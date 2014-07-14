@@ -28,7 +28,8 @@ use Exception;
 /**
  * All Phystrix commands must extend this class
  */
-abstract class AbstractCommand
+abstract class AbstractAsyncCommand
+    extends AbstractCommand /* trolo */
 {
     const EVENT_SUCCESS = 'SUCCESS';
     const EVENT_FAILURE = 'FAILURE';
@@ -216,53 +217,70 @@ abstract class AbstractCommand
         // always adding the command to request log
         $this->recordExecutedCommand();
         // trying from cache first
+
         if ($this->isRequestCacheEnabled()) {
             $fromCache = $this->requestCache->get($this->getCommandKey(), $this->getCacheKey());
+
             if ($fromCache !== null) {
                 $this->executionEvents[] = self::EVENT_RESPONSE_FROM_CACHE;
                 $metrics->markResponseFromCache();
+
                 return $fromCache;
             }
         }
+
         $circuitBreaker = $this->getCircuitBreaker();
+
         if (!$circuitBreaker->allowRequest()) {
             $this->executionEvents[] = self::EVENT_SHORT_CIRCUITED;
             $metrics->markShortCircuited();
-            return $this->getFallbackOrThrowException();
+
+            return \React\Promise\resolve($this->getFallbackOrThrowException());
         }
+
         $this->invocationStartTime = $this->getTimeInMilliseconds();
+
         try {
-            $result = $this->run();
-            $this->recordExecutionTime();
-            $this->executionEvents[] = self::EVENT_SUCCESS;
-            $metrics->markSuccess();
-            $circuitBreaker->markSuccess();
-        } catch (BadRequestException $exception) {
+            $result = $this->run(); // shoulde be a promise
+
+            $success = function($value) use ($metrics, $circuitBreaker) {
+                $this->recordExecutionTime();
+                $this->executionEvents[] = self::EVENT_SUCCESS;
+                $metrics->markSuccess();
+                $circuitBreaker->markSuccess();
+
+                return $value;
+            };
+
+            $error = function($exception) use ($metrics, $circuitBreaker) {
+                $this->recordExecutionTime();
+                $this->executionException = $exception;
+                $this->executionEvents[] = self::EVENT_FAILURE;
+                $metrics->markFailure();
+
+                return $this->getFallbackOrThrowException($exception);
+                //return \React\Promise\resolve($this->getFallbackOrThrowException($exception));
+            };
+
+            $result = $result->then($success, $error);
+
+         // todo: could be BadRequestException
+         // but if we hit this path we failed to even call run(), which
+         // should not happen, because it should return a failed promise
+        } catch (Exception $exception) {
             // Treated differently and allowed to propagate without any stats tracking or fallback logic
             $this->recordExecutionTime();
-            throw $exception;
-        } catch (Exception $exception) {
-            $this->recordExecutionTime();
-            $this->executionException = $exception;
-            $this->executionEvents[] = self::EVENT_FAILURE;
-            $metrics->markFailure();
-            $result = $this->getFallbackOrThrowException($exception);
+
+            return \React\Promise\reject($exception);
         }
 
         // putting the result into cache
         if ($this->isRequestCacheEnabled()) {
             $this->requestCache->put($this->getCommandKey(), $this->getCacheKey(), $result);
         }
+
         return $result;
     }
-
-    /**
-     * The code to be executed
-     *
-     * @return mixed
-     */
-    abstract protected function run();
-
     /**
      * Custom preparation logic, preceding command execution
      */
@@ -431,5 +449,19 @@ abstract class AbstractCommand
         if ($this->config->get('requestLog')->get('enabled')) {
             $this->requestLog->addExecutedCommand($this);
         }
+    }
+
+    // customized
+    private $eventLoop;
+
+    // todo: typehint
+    public function getEventLoop()
+    {
+        return $this->eventLoop;
+    }
+
+    public function setEventLoop($eventLoop)
+    {
+        $this->eventLoop = $eventLoop;
     }
 }
