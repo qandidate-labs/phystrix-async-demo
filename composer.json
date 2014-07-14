@@ -1,0 +1,6 @@
+{
+    "require": {
+        "odesk/phystrix": "dev-master",
+        "clue/buzz-react": "v0.1.1"
+    }
+}
